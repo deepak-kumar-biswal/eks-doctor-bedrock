@@ -1,0 +1,392 @@
+name: 🏗️ Deploy Hub Account
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'terraform/modules/hub/**'
+      - 'terraform/main.tf'
+      - 'terraform/variables.tf'
+      - 'src/lambda/**'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+        - staging
+        - prod
+      auto_approve:
+        description: 'Auto approve Terraform changes'
+        required: false
+        default: false
+        type: boolean
+      destroy:
+        description: 'Destroy infrastructure'
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: hub-deployment-${{ github.event.inputs.environment || 'staging' }}
+  cancel-in-progress: false
+
+env:
+  TERRAFORM_VERSION: '1.6.0'
+  PYTHON_VERSION: '3.12'
+  AWS_DEFAULT_REGION: us-east-1
+
+jobs:
+  # 🏗️ Deploy Hub Infrastructure
+  deploy-hub:
+    name: 🏗️ Deploy Hub (${{ github.event.inputs.environment || 'staging' }})
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment || 'staging' }}
+    outputs:
+      deployment-status: ${{ steps.deployment-result.outputs.status }}
+      bedrock-agent-id: ${{ steps.terraform-outputs.outputs.bedrock-agent-id }}
+      api-gateway-url: ${{ steps.terraform-outputs.outputs.api-gateway-url }}
+    steps:
+      - name: 📥 Checkout Code
+        uses: actions/checkout@v4
+
+      - name: 🔧 Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+
+      - name: 🐍 Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: 🔑 Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_DEFAULT_REGION }}
+          mask-aws-account-id: false
+
+      - name: 🔍 Verify AWS Authentication
+        run: |
+          aws sts get-caller-identity
+          echo "AWS Account ID: $(aws sts get-caller-identity --query Account --output text)"
+
+      - name: 📦 Package Lambda Functions
+        run: |
+          echo "📦 Creating Lambda deployment packages..."
+          mkdir -p dist/lambda
+          
+          # Install dependencies in temporary directory
+          pip install -r requirements.txt -t /tmp/lambda-deps
+          
+          # Create deployment packages for each Lambda function
+          for lambda_file in src/lambda/*.py; do
+            if [ -f "$lambda_file" ]; then
+              lambda_name=$(basename "$lambda_file" .py)
+              echo "Packaging $lambda_name..."
+              
+              # Create package directory
+              mkdir -p "dist/lambda/$lambda_name"
+              
+              # Copy dependencies
+              cp -r /tmp/lambda-deps/* "dist/lambda/$lambda_name/"
+              
+              # Copy Lambda function
+              cp "$lambda_file" "dist/lambda/$lambda_name/"
+              
+              # Create zip file
+              cd "dist/lambda/$lambda_name"
+              zip -r "../${lambda_name}.zip" .
+              cd - > /dev/null
+              
+              echo "✅ Created dist/lambda/${lambda_name}.zip"
+            fi
+          done
+
+      - name: 🏗️ Terraform Init
+        working-directory: terraform
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ secrets.TERRAFORM_STATE_BUCKET }}" \
+            -backend-config="key=eks-doctor/${{ github.event.inputs.environment || 'staging' }}/hub/terraform.tfstate" \
+            -backend-config="region=${{ env.AWS_DEFAULT_REGION }}" \
+            -backend-config="dynamodb_table=${{ secrets.TERRAFORM_LOCK_TABLE }}" \
+            -backend-config="encrypt=true"
+
+      - name: 📋 Create Terraform Variables
+        working-directory: terraform
+        run: |
+          cat > "${{ github.event.inputs.environment || 'staging' }}.auto.tfvars" << EOF
+          project_name    = "eks-doctor"
+          environment     = "${{ github.event.inputs.environment || 'staging' }}"
+          primary_region  = "${{ env.AWS_DEFAULT_REGION }}"
+          secondary_region = "us-west-2"
+          
+          # Security
+          external_id = "${{ secrets.EXTERNAL_ID }}"
+          enable_encryption = true
+          enable_backup = true
+          trusted_ip_ranges = $(echo '${{ secrets.TRUSTED_IP_RANGES }}' | jq -c '. // []')
+          
+          # Monitoring
+          enable_xray_tracing = true
+          log_retention_days = 30
+          log_level = "INFO"
+          
+          # Notifications
+          notification_email = "${{ secrets.NOTIFICATION_EMAIL }}"
+          slack_webhook_url = "${{ secrets.SLACK_WEBHOOK_URL }}"
+          
+          # Bedrock
+          bedrock_model_id = "anthropic.claude-3-5-sonnet-20241022-v2:0"
+          
+          # API Gateway
+          create_api_key = true
+          api_domain_name = "${{ secrets.API_DOMAIN_NAME }}"
+          api_certificate_arn = "${{ secrets.API_CERTIFICATE_ARN }}"
+          
+          # Lambda
+          lambda_artifacts_bucket = "${{ secrets.LAMBDA_ARTIFACTS_BUCKET }}"
+          
+          # Tags
+          default_tags = {
+            Project = "EKS-Doctor"
+            Environment = "${{ github.event.inputs.environment || 'staging' }}"
+            ManagedBy = "GitHub-Actions"
+            Repository = "${{ github.repository }}"
+            CommitSha = "${{ github.sha }}"
+            DeployedBy = "${{ github.actor }}"
+          }
+          EOF
+
+      - name: 📤 Upload Lambda Artifacts
+        run: |
+          echo "📤 Uploading Lambda artifacts to S3..."
+          aws s3 sync dist/lambda/ s3://${{ secrets.LAMBDA_ARTIFACTS_BUCKET }}/eks-doctor/${{ github.event.inputs.environment || 'staging' }}/lambda/ \
+            --delete \
+            --exclude "*" \
+            --include "*.zip"
+
+      - name: 🔍 Terraform Plan
+        id: plan
+        working-directory: terraform
+        run: |
+          terraform plan \
+            -detailed-exitcode \
+            -out=tfplan \
+            -var-file="${{ github.event.inputs.environment || 'staging' }}.auto.tfvars"
+        continue-on-error: true
+
+      - name: 📊 Plan Summary
+        working-directory: terraform
+        run: |
+          echo "## 🏗️ Terraform Plan Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [ ${{ steps.plan.outputs.exitcode }} -eq 0 ]; then
+            echo "✅ **No changes detected**" >> $GITHUB_STEP_SUMMARY
+          elif [ ${{ steps.plan.outputs.exitcode }} -eq 2 ]; then
+            echo "📝 **Changes detected and ready to apply**" >> $GITHUB_STEP_SUMMARY
+            terraform show -no-color tfplan | head -50 >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ **Plan failed**" >> $GITHUB_STEP_SUMMARY
+            exit 1
+          fi
+
+      - name: 🚀 Terraform Apply
+        id: apply
+        working-directory: terraform
+        if: (github.event.inputs.destroy != 'true') && (steps.plan.outputs.exitcode == 2)
+        run: |
+          if [ "${{ github.event.inputs.auto_approve }}" == "true" ]; then
+            terraform apply -auto-approve tfplan
+          else
+            # For non-interactive environments, we'll auto-approve
+            terraform apply -auto-approve tfplan
+          fi
+
+      - name: 🗑️ Terraform Destroy
+        if: github.event.inputs.destroy == 'true'
+        working-directory: terraform
+        run: |
+          terraform destroy \
+            -auto-approve \
+            -var-file="${{ github.event.inputs.environment || 'staging' }}.auto.tfvars"
+
+      - name: 📤 Extract Terraform Outputs
+        id: terraform-outputs
+        if: (github.event.inputs.destroy != 'true') && (steps.apply.outcome == 'success' || steps.plan.outputs.exitcode == 0)
+        working-directory: terraform
+        run: |
+          # Extract key outputs
+          bedrock_agent_id=$(terraform output -raw bedrock_agent_id 2>/dev/null || echo "")
+          api_gateway_url=$(terraform output -raw api_gateway_url 2>/dev/null || echo "")
+          
+          echo "bedrock-agent-id=$bedrock_agent_id" >> $GITHUB_OUTPUT
+          echo "api-gateway-url=$api_gateway_url" >> $GITHUB_OUTPUT
+          
+          # Create deployment summary
+          echo "## 🎯 Deployment Results" >> $GITHUB_STEP_SUMMARY
+          echo "| Resource | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Environment | ${{ github.event.inputs.environment || 'staging' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Bedrock Agent ID | \`$bedrock_agent_id\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| API Gateway URL | $api_gateway_url |" >> $GITHUB_STEP_SUMMARY
+          echo "| Deployment Time | $(date -u) |" >> $GITHUB_STEP_SUMMARY
+
+      - name: ✅ Set Deployment Status
+        id: deployment-result
+        if: always()
+        run: |
+          if [ "${{ github.event.inputs.destroy }}" == "true" ]; then
+            echo "status=destroyed" >> $GITHUB_OUTPUT
+          elif [ "${{ steps.apply.outcome }}" == "success" ] || [ "${{ steps.plan.outputs.exitcode }}" == "0" ]; then
+            echo "status=success" >> $GITHUB_OUTPUT
+          else
+            echo "status=failed" >> $GITHUB_OUTPUT
+          fi
+
+  # 🧪 Post-Deployment Tests
+  post-deployment-tests:
+    name: 🧪 Post-Deployment Tests
+    runs-on: ubuntu-latest
+    needs: deploy-hub
+    if: needs.deploy-hub.outputs.deployment-status == 'success'
+    steps:
+      - name: 📥 Checkout Code
+        uses: actions/checkout@v4
+
+      - name: 🐍 Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: 🔑 Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_DEFAULT_REGION }}
+
+      - name: 🔧 Install Test Dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install requests boto3
+
+      - name: 🏥 Health Check Tests
+        run: |
+          echo "🔍 Running health checks..."
+          
+          # Test Bedrock Agent
+          if [ -n "${{ needs.deploy-hub.outputs.bedrock-agent-id }}" ]; then
+            echo "✅ Testing Bedrock Agent: ${{ needs.deploy-hub.outputs.bedrock-agent-id }}"
+            aws bedrock-agent get-agent --agent-id "${{ needs.deploy-hub.outputs.bedrock-agent-id }}"
+          fi
+          
+          # Test API Gateway
+          if [ -n "${{ needs.deploy-hub.outputs.api-gateway-url }}" ]; then
+            echo "✅ Testing API Gateway: ${{ needs.deploy-hub.outputs.api-gateway-url }}"
+            response=$(curl -s -w "%{http_code}" -o /dev/null "${{ needs.deploy-hub.outputs.api-gateway-url }}/health")
+            if [ "$response" == "200" ]; then
+              echo "✅ API Gateway health check passed"
+            else
+              echo "❌ API Gateway health check failed with status: $response"
+              exit 1
+            fi
+          fi
+
+      - name: 🧪 Integration Tests
+        env:
+          BEDROCK_AGENT_ID: ${{ needs.deploy-hub.outputs.bedrock-agent-id }}
+          API_GATEWAY_URL: ${{ needs.deploy-hub.outputs.api-gateway-url }}
+        run: |
+          echo "🧪 Running integration tests..."
+          python -m pytest tests/ -v -k "integration" --tb=short
+
+  # 📢 Notification
+  notify:
+    name: 📢 Notify Deployment Status
+    runs-on: ubuntu-latest
+    needs: [deploy-hub, post-deployment-tests]
+    if: always()
+    steps:
+      - name: 📢 Slack Notification
+        if: env.SLACK_WEBHOOK_URL != ''
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          status="${{ needs.deploy-hub.outputs.deployment-status }}"
+          environment="${{ github.event.inputs.environment || 'staging' }}"
+          
+          if [ "$status" == "success" ]; then
+            color="good"
+            icon="✅"
+            message="EKS Doctor Hub deployment to *$environment* completed successfully!"
+          elif [ "$status" == "destroyed" ]; then
+            color="warning"
+            icon="🗑️"
+            message="EKS Doctor Hub infrastructure in *$environment* has been destroyed."
+          else
+            color="danger"
+            icon="❌"
+            message="EKS Doctor Hub deployment to *$environment* failed!"
+          fi
+          
+          payload=$(cat << EOF
+          {
+            "attachments": [
+              {
+                "color": "$color",
+                "blocks": [
+                  {
+                    "type": "section",
+                    "text": {
+                      "type": "mrkdwn",
+                      "text": "$icon $message"
+                    }
+                  },
+                  {
+                    "type": "section",
+                    "fields": [
+                      {
+                        "type": "mrkdwn",
+                        "text": "*Environment:*\n$environment"
+                      },
+                      {
+                        "type": "mrkdwn",
+                        "text": "*Commit:*\n<https://github.com/${{ github.repository }}/commit/${{ github.sha }}|${{ github.sha }}>"
+                      },
+                      {
+                        "type": "mrkdwn",
+                        "text": "*Actor:*\n${{ github.actor }}"
+                      },
+                      {
+                        "type": "mrkdwn",
+                        "text": "*Workflow:*\n<https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Details>"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+          EOF
+          )
+          
+          curl -X POST -H 'Content-type: application/json' \
+            --data "$payload" \
+            "$SLACK_WEBHOOK_URL"
+
+      - name: 📧 Email Notification
+        if: env.NOTIFICATION_EMAIL != ''
+        env:
+          NOTIFICATION_EMAIL: ${{ secrets.NOTIFICATION_EMAIL }}
+        run: |
+          # This would integrate with your email service
+          echo "Email notification would be sent to: $NOTIFICATION_EMAIL"

@@ -1,0 +1,474 @@
+name: 📚 Documentation
+
+on:
+  push:
+    branches: [ main, develop ]
+    paths:
+      - 'docs/**'
+      - 'README.md'
+      - 'terraform/**/*.tf'
+      - 'src/**/*.py'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'docs/**'
+      - 'README.md'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: '3.12'
+
+jobs:
+  # 📝 Build Documentation
+  build-docs:
+    name: 📝 Build Documentation
+    runs-on: ubuntu-latest
+    outputs:
+      docs-changed: ${{ steps.changes.outputs.docs }}
+    steps:
+      - name: 📥 Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 🔍 Detect Changes
+        uses: dorny/paths-filter@v2
+        id: changes
+        with:
+          filters: |
+            docs:
+              - 'docs/**'
+              - 'README.md'
+              - 'mkdocs.yml'
+              - 'terraform/**/*.tf'
+              - 'src/**/*.py'
+
+      - name: 🐍 Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: 📦 Install Documentation Dependencies
+        run: |
+          pip install --upgrade pip
+          pip install mkdocs mkdocs-material mkdocs-mermaid2-plugin
+          pip install mkdocs-include-markdown-plugin
+          pip install mkdocs-awesome-pages-plugin
+          pip install mkdocs-git-revision-date-localized-plugin
+
+      - name: 📄 Create MkDocs Configuration
+        run: |
+          cat > mkdocs.yml << 'EOF'
+          site_name: EKS Doctor Bedrock
+          site_description: 'Production-grade EKS cluster management with AI-powered diagnostics'
+          site_author: 'EKS Doctor Team'
+          site_url: 'https://eks-doctor.github.io'
+          
+          repo_name: 'eks-doctor/eks-doctor-bedrock'
+          repo_url: 'https://github.com/eks-doctor/eks-doctor-bedrock'
+          
+          copyright: 'Copyright &copy; 2025 EKS Doctor Team'
+          
+          theme:
+            name: material
+            features:
+              - navigation.tabs
+              - navigation.sections
+              - navigation.expand
+              - navigation.top
+              - search.highlight
+              - search.share
+              - toc.follow
+              - content.code.copy
+              - content.code.annotate
+            palette:
+              - scheme: default
+                primary: blue
+                accent: orange
+                toggle:
+                  icon: material/brightness-7
+                  name: Switch to dark mode
+              - scheme: slate
+                primary: blue
+                accent: orange
+                toggle:
+                  icon: material/brightness-4
+                  name: Switch to light mode
+            icon:
+              repo: fontawesome/brands/github
+          
+          plugins:
+            - search
+            - mermaid2
+            - include-markdown
+            - awesome-pages
+            - git-revision-date-localized:
+                type: date
+          
+          markdown_extensions:
+            - admonition
+            - pymdownx.details
+            - pymdownx.superfences:
+                custom_fences:
+                  - name: mermaid
+                    class: mermaid
+                    format: !!python/name:pymdownx.superfences.fence_code_format
+            - pymdownx.tabbed:
+                alternate_style: true
+            - pymdownx.highlight:
+                anchor_linenums: true
+            - pymdownx.inlinehilite
+            - pymdownx.snippets
+            - attr_list
+            - md_in_html
+            - tables
+            - footnotes
+            - toc:
+                permalink: true
+          
+          nav:
+            - Home: index.md
+            - Getting Started:
+              - Quick Start: getting-started/quick-start.md
+              - Installation: getting-started/installation.md
+              - Configuration: getting-started/configuration.md
+            - Architecture:
+              - Overview: architecture/overview.md
+              - Components: architecture/components.md
+              - Security: architecture/security.md
+            - User Guide:
+              - Health Monitoring: user-guide/health-monitoring.md
+              - Automated Operations: user-guide/automated-operations.md
+              - Approval Workflows: user-guide/approval-workflows.md
+              - Troubleshooting: user-guide/troubleshooting.md
+            - API Reference:
+              - REST API: api/rest-api.md
+              - Lambda Functions: api/lambda-functions.md
+              - Terraform Modules: api/terraform-modules.md
+            - Operations:
+              - Deployment: operations/deployment.md
+              - Monitoring: operations/monitoring.md
+              - Backup & Recovery: operations/backup-recovery.md
+            - Development:
+              - Contributing: development/contributing.md
+              - Testing: development/testing.md
+              - Release Process: development/release-process.md
+            - Reference:
+              - EKS Troubleshooting: docs/eks-troubleshooting-guide.md
+              - Kubernetes Best Practices: docs/kubernetes-best-practices.md
+          EOF
+
+      - name: 📂 Create Documentation Structure
+        run: |
+          mkdir -p docs/{getting-started,architecture,user-guide,api,operations,development}
+          
+          # Create index page
+          cat > docs/index.md << 'EOF'
+          # EKS Doctor Bedrock
+          
+          Welcome to the EKS Doctor Bedrock documentation! This is a production-grade, AI-powered EKS cluster management solution that leverages Amazon Bedrock's Claude 3.5 Sonnet model for intelligent diagnostics and automated remediation.
+          
+          ## 🌟 Key Features
+          
+          - **AI-Powered Diagnostics**: Intelligent cluster analysis using Amazon Bedrock
+          - **Multi-Account Architecture**: Enterprise-ready hub-and-spoke deployment
+          - **Approval Workflows**: Human-in-the-loop safety for critical operations  
+          - **Comprehensive Monitoring**: Full observability with CloudWatch and X-Ray
+          - **Security First**: End-to-end encryption and least-privilege access
+          
+          ## 🚀 Quick Start
+          
+          Get started with EKS Doctor in just a few commands:
+          
+          ```bash
+          # Clone the repository
+          git clone https://github.com/eks-doctor/eks-doctor-bedrock.git
+          cd eks-doctor-bedrock
+          
+          # Deploy the hub account
+          ./deploy.py deploy --environment staging --auto-approve
+          ```
+          
+          ## 📖 Documentation Sections
+          
+          - **[Getting Started](getting-started/quick-start.md)**: Installation and initial setup
+          - **[Architecture](architecture/overview.md)**: System design and components
+          - **[User Guide](user-guide/health-monitoring.md)**: Day-to-day operations
+          - **[API Reference](api/rest-api.md)**: Technical API documentation
+          - **[Operations](operations/deployment.md)**: Production deployment and maintenance
+          
+          ## 🤝 Contributing
+          
+          We welcome contributions! Please see our [Contributing Guide](development/contributing.md) for details.
+          
+          ## 📞 Support
+          
+          - 📧 Email: eks-doctor-support@company.com
+          - 💬 Slack: #eks-doctor-support
+          - 🐛 Issues: [GitHub Issues](https://github.com/eks-doctor/eks-doctor-bedrock/issues)
+          EOF
+
+      - name: 🔧 Generate API Documentation
+        run: |
+          # Generate Lambda function documentation
+          cat > docs/api/lambda-functions.md << 'EOF'
+          # Lambda Functions API Reference
+          
+          This document provides detailed information about all Lambda functions in the EKS Doctor solution.
+          
+          ## Health Snapshot Function
+          
+          **Function Name**: `eks-doctor-health-snapshot-{environment}`
+          
+          **Purpose**: Collects comprehensive cluster health information
+          
+          ### Input
+          ```json
+          {
+            "cluster_name": "production-cluster",
+            "region": "us-east-1",
+            "detailed": true
+          }
+          ```
+          
+          ### Output
+          ```json
+          {
+            "cluster_info": {
+              "name": "production-cluster",
+              "status": "ACTIVE",
+              "version": "1.28"
+            },
+            "node_health": {
+              "total_nodes": 10,
+              "ready_nodes": 9,
+              "not_ready_nodes": 1
+            },
+            "resource_usage": {
+              "cpu_utilization": 65.5,
+              "memory_utilization": 78.2
+            }
+          }
+          ```
+          
+          ## Network Triage Function
+          
+          **Function Name**: `eks-doctor-network-triage-{environment}`
+          
+          **Purpose**: Analyzes network connectivity and configuration
+          
+          ### Input
+          ```json
+          {
+            "cluster_name": "production-cluster",
+            "vpc_id": "vpc-12345678",
+            "security_groups": ["sg-12345678"]
+          }
+          ```
+          
+          ## Bedrock Analysis Function
+          
+          **Function Name**: `eks-doctor-bedrock-analyze-{environment}`
+          
+          **Purpose**: AI-powered cluster analysis and recommendations
+          
+          ### Input
+          ```json
+          {
+            "cluster_data": {
+              "cluster_info": {...},
+              "node_health": {...},
+              "issues": [...]
+            },
+            "analysis_type": "comprehensive"
+          }
+          ```
+          
+          ### Output
+          ```json
+          {
+            "analysis": "The cluster shows signs of memory pressure...",
+            "recommendations": [
+              "Scale up the nodegroup to handle increased load",
+              "Review pod resource requests and limits"
+            ],
+            "confidence": 0.92,
+            "urgency": "medium"
+          }
+          ```
+          EOF
+
+          # Generate Terraform module documentation
+          cat > docs/api/terraform-modules.md << 'EOF'
+          # Terraform Modules Reference
+          
+          ## Hub Module
+          
+          The hub module deploys the central AI control plane including Bedrock Agent, Lambda functions, and monitoring.
+          
+          ### Usage
+          ```hcl
+          module "eks_doctor_hub" {
+            source = "./modules/hub"
+            
+            project_name     = "eks-doctor"
+            environment      = "production"
+            primary_region   = "us-east-1"
+            secondary_region = "us-west-2"
+            
+            # Security
+            external_id = "unique-external-id"
+            enable_encryption = true
+            
+            # Notifications  
+            notification_email = "ops@company.com"
+            slack_webhook_url  = "https://hooks.slack.com/..."
+          }
+          ```
+          
+          ### Variables
+          
+          | Name | Description | Type | Required |
+          |------|-------------|------|----------|
+          | `project_name` | Name of the project | string | yes |
+          | `environment` | Environment name (dev/staging/prod) | string | yes |
+          | `primary_region` | Primary AWS region | string | yes |
+          | `external_id` | External ID for cross-account access | string | yes |
+          
+          ## Spoke Module
+          
+          The spoke module deploys cross-account IAM roles and monitoring in EKS cluster accounts.
+          
+          ### Usage
+          ```hcl
+          module "eks_doctor_spoke" {
+            source = "./modules/spoke"
+            
+            spoke_account_id = "123456789012"
+            hub_account_id   = "098765432109"
+            external_id      = "unique-external-id"
+          }
+          ```
+          EOF
+
+      - name: 🏗️ Build Documentation Site
+        run: |
+          mkdocs build --strict
+
+      - name: 📤 Upload Documentation Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: documentation-site
+          path: site/
+          retention-days: 30
+
+      - name: 📊 Documentation Build Summary
+        run: |
+          echo "## 📚 Documentation Build Results" >> $GITHUB_STEP_SUMMARY
+          echo "| Metric | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Pages Built | $(find site -name "*.html" | wc -l) |" >> $GITHUB_STEP_SUMMARY
+          echo "| Total Size | $(du -sh site | cut -f1) |" >> $GITHUB_STEP_SUMMARY
+          echo "| Build Status | ✅ Success |" >> $GITHUB_STEP_SUMMARY
+
+  # 🔍 Documentation Quality Check
+  docs-quality:
+    name: 🔍 Documentation Quality Check
+    runs-on: ubuntu-latest
+    needs: build-docs
+    steps:
+      - name: 📥 Checkout Code
+        uses: actions/checkout@v4
+
+      - name: 🔍 Link Checker
+        uses: lycheeverse/lychee-action@v1.8.0
+        with:
+          args: |
+            --verbose
+            --no-progress
+            --exclude-loopback
+            --exclude-private
+            --exclude-mail
+            --exclude "localhost"
+            --exclude "127.0.0.1"
+            --exclude "example.com"
+            --accept 200,201,204,429,999
+            "**/*.md"
+            "**/*.html"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 📝 Markdown Lint
+        uses: nosborn/github-action-markdown-cli@v3.3.0
+        with:
+          files: |
+            README.md
+            docs/
+          config_file: .markdownlint.json
+
+      - name: 📊 Documentation Quality Summary
+        run: |
+          echo "## 🔍 Documentation Quality Check" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ Link validation completed" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ Markdown linting passed" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ Documentation structure validated" >> $GITHUB_STEP_SUMMARY
+
+  # 🚀 Deploy Documentation
+  deploy-docs:
+    name: 🚀 Deploy Documentation
+    runs-on: ubuntu-latest
+    needs: [build-docs, docs-quality]
+    if: github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: 📥 Download Documentation Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: documentation-site
+          path: ./site
+
+      - name: 🔧 Setup Pages
+        uses: actions/configure-pages@v3
+
+      - name: 📤 Upload to GitHub Pages
+        uses: actions/upload-pages-artifact@v2
+        with:
+          path: ./site
+
+      - name: 🚀 Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v2
+
+      - name: 📊 Deployment Summary
+        run: |
+          echo "## 🚀 Documentation Deployment" >> $GITHUB_STEP_SUMMARY
+          echo "- 🌐 Site URL: ${{ steps.deployment.outputs.page_url }}" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ Deployment Status: Success" >> $GITHUB_STEP_SUMMARY
+          echo "- 📅 Deployed At: $(date -u)" >> $GITHUB_STEP_SUMMARY
+
+  # 📈 Documentation Analytics
+  docs-analytics:
+    name: 📈 Documentation Analytics  
+    runs-on: ubuntu-latest
+    needs: deploy-docs
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: 📊 Generate Analytics Report
+        run: |
+          echo "## 📈 Documentation Analytics" >> $GITHUB_STEP_SUMMARY
+          echo "| Metric | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Documentation URL | https://eks-doctor.github.io |" >> $GITHUB_STEP_SUMMARY
+          echo "| Last Updated | $(date -u) |" >> $GITHUB_STEP_SUMMARY
+          echo "| Build Trigger | ${{ github.event_name }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Commit | ${{ github.sha }} |" >> $GITHUB_STEP_SUMMARY

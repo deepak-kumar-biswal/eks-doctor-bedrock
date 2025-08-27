@@ -1,0 +1,272 @@
+name: 🔍 Continuous Integration
+
+on:
+  pull_request:
+    branches: [ main, develop ]
+  push:
+    branches: [ main, develop ]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: '3.12'
+  TERRAFORM_VERSION: '1.6.0'
+  AWS_DEFAULT_REGION: us-east-1
+
+jobs:
+  # 🧪 Quality Assurance
+  code-quality:
+    name: 🧪 Code Quality & Security
+    runs-on: ubuntu-latest
+    outputs:
+      python-cache-key: ${{ steps.cache-keys.outputs.python-cache-key }}
+      terraform-cache-key: ${{ steps.cache-keys.outputs.terraform-cache-key }}
+    steps:
+      - name: 📥 Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 🐍 Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: 🔧 Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+
+      - name: 🔍 Lint Python Code
+        run: |
+          echo "::group::Running Black"
+          black --check --diff src/ tests/ *.py
+          echo "::endgroup::"
+          
+          echo "::group::Running isort"
+          isort --check-only --diff src/ tests/ *.py
+          echo "::endgroup::"
+          
+          echo "::group::Running flake8"
+          flake8 src/ tests/ *.py --max-line-length=100 --ignore=E203,W503
+          echo "::endgroup::"
+          
+          echo "::group::Running pylint"
+          pylint src/ --disable=C0114,C0115,C0116 --max-line-length=100
+          echo "::endgroup::"
+
+      - name: 🔒 Security Scan with Bandit
+        run: |
+          bandit -r src/ -ll -f json -o bandit-report.json
+          bandit -r src/ -ll
+
+      - name: 🛡️ Safety Check for Dependencies
+        run: safety check --json --output safety-report.json || true
+
+      - name: 📊 Generate Cache Keys
+        id: cache-keys
+        run: |
+          echo "python-cache-key=${{ runner.os }}-python-${{ env.PYTHON_VERSION }}-${{ hashFiles('**/requirements*.txt') }}" >> $GITHUB_OUTPUT
+          echo "terraform-cache-key=${{ runner.os }}-terraform-${{ env.TERRAFORM_VERSION }}-${{ hashFiles('**/*.tf') }}" >> $GITHUB_OUTPUT
+
+      - name: 📤 Upload Security Reports
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: security-reports
+          path: |
+            bandit-report.json
+            safety-report.json
+          retention-days: 30
+
+  # 🧪 Unit Testing
+  unit-tests:
+    name: 🧪 Unit Tests
+    runs-on: ubuntu-latest
+    needs: code-quality
+    strategy:
+      matrix:
+        python-version: ['3.11', '3.12']
+    steps:
+      - name: 📥 Checkout Code
+        uses: actions/checkout@v4
+
+      - name: 🐍 Setup Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: 'pip'
+
+      - name: 🔧 Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+
+      - name: 🧪 Run Unit Tests
+        run: |
+          python -m pytest tests/ \
+            --verbose \
+            --tb=short \
+            --cov=src \
+            --cov-report=xml \
+            --cov-report=html \
+            --cov-report=term \
+            --junit-xml=test-results.xml \
+            --cov-fail-under=80
+
+      - name: 📊 Upload Coverage to Codecov
+        uses: codecov/codecov-action@v3
+        if: matrix.python-version == '3.12'
+        with:
+          file: ./coverage.xml
+          flags: unittests
+          name: codecov-umbrella
+
+      - name: 📤 Upload Test Results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results-${{ matrix.python-version }}
+          path: |
+            test-results.xml
+            htmlcov/
+          retention-days: 30
+
+  # 🏗️ Infrastructure Validation
+  terraform-validate:
+    name: 🏗️ Terraform Validation
+    runs-on: ubuntu-latest
+    needs: code-quality
+    steps:
+      - name: 📥 Checkout Code
+        uses: actions/checkout@v4
+
+      - name: 🔧 Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+      - name: 🔍 Terraform Format Check
+        run: |
+          terraform fmt -check -recursive terraform/
+
+      - name: 🏗️ Terraform Init & Validate
+        run: |
+          cd terraform
+          terraform init -backend=false
+          terraform validate
+
+      - name: 🔍 TFLint
+        uses: terraform-linters/setup-tflint@v4
+        with:
+          tflint_version: latest
+
+      - name: 🔍 Run TFLint
+        run: |
+          cd terraform
+          tflint --init
+          tflint --recursive
+
+      - name: 🛡️ Terraform Security Scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'config'
+          scan-ref: 'terraform/'
+          format: 'sarif'
+          output: 'trivy-terraform.sarif'
+
+      - name: 📤 Upload Terraform Security Results
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'trivy-terraform.sarif'
+
+  # 📝 Documentation
+  documentation:
+    name: 📝 Documentation Build
+    runs-on: ubuntu-latest
+    steps:
+      - name: 📥 Checkout Code
+        uses: actions/checkout@v4
+
+      - name: 🐍 Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: 🔧 Install Documentation Dependencies
+        run: |
+          pip install mkdocs mkdocs-material mkdocs-mermaid2-plugin
+
+      - name: 📝 Build Documentation
+        run: |
+          # Create mkdocs.yml if it doesn't exist
+          if [ ! -f mkdocs.yml ]; then
+            cat > mkdocs.yml << EOF
+          site_name: EKS Doctor Bedrock
+          theme:
+            name: material
+            palette:
+              primary: blue
+              accent: orange
+          plugins:
+            - search
+            - mermaid2
+          nav:
+            - Home: README.md
+            - Documentation:
+              - EKS Troubleshooting: docs/eks-troubleshooting-guide.md
+              - Kubernetes Best Practices: docs/kubernetes-best-practices.md
+          EOF
+          fi
+          mkdocs build
+
+      - name: 📤 Upload Documentation
+        uses: actions/upload-artifact@v4
+        with:
+          name: documentation
+          path: site/
+          retention-days: 30
+
+  # 🔍 Final Quality Gate
+  quality-gate:
+    name: 🚀 Quality Gate
+    runs-on: ubuntu-latest
+    needs: [code-quality, unit-tests, terraform-validate, documentation]
+    if: always()
+    steps:
+      - name: ✅ Check Quality Gate
+        run: |
+          if [[ "${{ needs.code-quality.result }}" == "failure" ]]; then
+            echo "❌ Code quality check failed"
+            exit 1
+          fi
+          
+          if [[ "${{ needs.unit-tests.result }}" == "failure" ]]; then
+            echo "❌ Unit tests failed"
+            exit 1
+          fi
+          
+          if [[ "${{ needs.terraform-validate.result }}" == "failure" ]]; then
+            echo "❌ Terraform validation failed"
+            exit 1
+          fi
+          
+          echo "✅ All quality checks passed!"
+
+      - name: 🏆 Quality Summary
+        if: always()
+        run: |
+          echo "## 🎯 Quality Gate Summary" >> $GITHUB_STEP_SUMMARY
+          echo "| Check | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Code Quality | ${{ needs.code-quality.result == 'success' && '✅' || '❌' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Unit Tests | ${{ needs.unit-tests.result == 'success' && '✅' || '❌' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Terraform | ${{ needs.terraform-validate.result == 'success' && '✅' || '❌' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Documentation | ${{ needs.documentation.result == 'success' && '✅' || '❌' }} |" >> $GITHUB_STEP_SUMMARY

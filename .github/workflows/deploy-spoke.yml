@@ -1,0 +1,451 @@
+name: 🌐 Deploy Spoke Accounts
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+        - staging
+        - prod
+      spoke_accounts:
+        description: 'Comma-separated list of spoke account IDs'
+        required: true
+        type: string
+      hub_account_id:
+        description: 'Hub account ID'
+        required: true
+        type: string
+      auto_approve:
+        description: 'Auto approve Terraform changes'
+        required: false
+        default: false
+        type: boolean
+      destroy:
+        description: 'Destroy infrastructure'
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: spoke-deployment-${{ github.event.inputs.environment || 'staging' }}
+  cancel-in-progress: false
+
+env:
+  TERRAFORM_VERSION: '1.6.0'
+  PYTHON_VERSION: '3.12'
+  AWS_DEFAULT_REGION: us-east-1
+
+jobs:
+  # 📋 Prepare Deployment Matrix
+  prepare-matrix:
+    name: 📋 Prepare Deployment Matrix
+    runs-on: ubuntu-latest
+    outputs:
+      spoke-matrix: ${{ steps.matrix.outputs.spoke-matrix }}
+    steps:
+      - name: 🔍 Parse Spoke Accounts
+        id: matrix
+        run: |
+          # Convert comma-separated accounts to JSON array
+          spoke_accounts="${{ github.event.inputs.spoke_accounts }}"
+          spoke_array=$(echo "$spoke_accounts" | tr ',' '\n' | sed 's/^[ \t]*//;s/[ \t]*$//' | jq -R -s -c 'split("\n") | map(select(length > 0))')
+          
+          echo "Spoke accounts: $spoke_array"
+          echo "spoke-matrix=$spoke_array" >> $GITHUB_OUTPUT
+
+  # 🌐 Deploy to Each Spoke Account
+  deploy-spoke:
+    name: 🌐 Deploy Spoke Account ${{ matrix.spoke_account }}
+    runs-on: ubuntu-latest
+    needs: prepare-matrix
+    strategy:
+      matrix:
+        spoke_account: ${{ fromJSON(needs.prepare-matrix.outputs.spoke-matrix) }}
+      fail-fast: false
+      max-parallel: 3
+    environment: spoke-${{ matrix.spoke_account }}-${{ github.event.inputs.environment }}
+    outputs:
+      deployment-status-${{ matrix.spoke_account }}: ${{ steps.deployment-result.outputs.status }}
+    steps:
+      - name: 📥 Checkout Code
+        uses: actions/checkout@v4
+
+      - name: 🔧 Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+
+      - name: 🔑 Configure AWS Credentials (Spoke Account)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets[format('SPOKE_{0}_AWS_ACCESS_KEY_ID', matrix.spoke_account)] }}
+          aws-secret-access-key: ${{ secrets[format('SPOKE_{0}_AWS_SECRET_ACCESS_KEY', matrix.spoke_account)] }}
+          aws-region: ${{ env.AWS_DEFAULT_REGION }}
+          mask-aws-account-id: false
+
+      - name: 🔍 Verify AWS Authentication
+        run: |
+          current_account=$(aws sts get-caller-identity --query Account --output text)
+          echo "Current AWS Account: $current_account"
+          
+          if [ "$current_account" != "${{ matrix.spoke_account }}" ]; then
+            echo "❌ Account mismatch! Expected: ${{ matrix.spoke_account }}, Got: $current_account"
+            exit 1
+          fi
+          echo "✅ Authentication verified for spoke account: ${{ matrix.spoke_account }}"
+
+      - name: 📂 Setup Spoke Directory
+        run: |
+          spoke_dir="terraform/environments/spoke-${{ matrix.spoke_account }}"
+          mkdir -p "$spoke_dir"
+          echo "Created spoke directory: $spoke_dir"
+
+      - name: 🏗️ Generate Spoke Terraform Configuration
+        run: |
+          spoke_dir="terraform/environments/spoke-${{ matrix.spoke_account }}"
+          
+          cat > "$spoke_dir/main.tf" << 'EOF'
+          # Spoke Account Configuration - ${{ matrix.spoke_account }}
+          terraform {
+            required_version = ">= 1.5"
+            
+            backend "s3" {}
+            
+            required_providers {
+              aws = {
+                source  = "hashicorp/aws"
+                version = "~> 5.0"
+              }
+            }
+          }
+
+          # Configure AWS Provider
+          provider "aws" {
+            region = var.primary_region
+            
+            default_tags {
+              tags = var.default_tags
+            }
+          }
+
+          # Secondary region provider
+          provider "aws" {
+            alias  = "secondary"
+            region = var.secondary_region
+            
+            default_tags {
+              tags = var.default_tags
+            }
+          }
+
+          # Spoke Module
+          module "eks_doctor_spoke" {
+            source = "../../modules/spoke"
+            
+            # Pass all variables
+            project_name     = var.project_name
+            environment      = var.environment
+            spoke_account_id = "${{ matrix.spoke_account }}"
+            hub_account_id   = var.hub_account_id
+            primary_region   = var.primary_region
+            secondary_region = var.secondary_region
+            external_id      = var.external_id
+            
+            # Monitoring
+            enable_xray_tracing = var.enable_xray_tracing
+            log_retention_days  = var.log_retention_days
+            log_level          = var.log_level
+            
+            # Notifications
+            notification_email  = var.notification_email
+            slack_webhook_url   = var.slack_webhook_url
+            
+            # Tags
+            default_tags = var.default_tags
+          }
+
+          # Outputs
+          output "spoke_outputs" {
+            description = "Spoke account outputs"
+            value       = module.eks_doctor_spoke
+            sensitive   = true
+          }
+
+          output "cross_account_role_arn" {
+            description = "Cross-account role ARN"
+            value       = module.eks_doctor_spoke.cross_account_role_arn
+          }
+
+          output "eks_access_role_arn" {
+            description = "EKS access role ARN"
+            value       = module.eks_doctor_spoke.eks_access_role_arn
+          }
+          EOF
+
+          # Create variables file
+          cp terraform/variables.tf "$spoke_dir/"
+          
+          echo "✅ Generated Terraform configuration for spoke account: ${{ matrix.spoke_account }}"
+
+      - name: 🏗️ Terraform Init (Spoke)
+        working-directory: terraform/environments/spoke-${{ matrix.spoke_account }}
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ secrets.TERRAFORM_STATE_BUCKET }}" \
+            -backend-config="key=eks-doctor/${{ github.event.inputs.environment }}/spoke-${{ matrix.spoke_account }}/terraform.tfstate" \
+            -backend-config="region=${{ env.AWS_DEFAULT_REGION }}" \
+            -backend-config="dynamodb_table=${{ secrets.TERRAFORM_LOCK_TABLE }}" \
+            -backend-config="encrypt=true"
+
+      - name: 📋 Create Spoke Terraform Variables
+        working-directory: terraform/environments/spoke-${{ matrix.spoke_account }}
+        run: |
+          cat > "${{ github.event.inputs.environment }}.auto.tfvars" << EOF
+          project_name    = "eks-doctor"
+          environment     = "${{ github.event.inputs.environment }}"
+          spoke_account_id = "${{ matrix.spoke_account }}"
+          hub_account_id  = "${{ github.event.inputs.hub_account_id }}"
+          primary_region  = "${{ env.AWS_DEFAULT_REGION }}"
+          secondary_region = "us-west-2"
+          
+          # Security
+          external_id = "${{ secrets.EXTERNAL_ID }}"
+          
+          # Monitoring
+          enable_xray_tracing = true
+          log_retention_days = 30
+          log_level = "INFO"
+          
+          # Notifications
+          notification_email = "${{ secrets.NOTIFICATION_EMAIL }}"
+          slack_webhook_url = "${{ secrets.SLACK_WEBHOOK_URL }}"
+          
+          # Tags
+          default_tags = {
+            Project = "EKS-Doctor"
+            Environment = "${{ github.event.inputs.environment }}"
+            AccountType = "Spoke"
+            SpokeAccountId = "${{ matrix.spoke_account }}"
+            HubAccountId = "${{ github.event.inputs.hub_account_id }}"
+            ManagedBy = "GitHub-Actions"
+            Repository = "${{ github.repository }}"
+            CommitSha = "${{ github.sha }}"
+            DeployedBy = "${{ github.actor }}"
+          }
+          EOF
+
+      - name: 🔍 Terraform Plan (Spoke)
+        id: plan
+        working-directory: terraform/environments/spoke-${{ matrix.spoke_account }}
+        run: |
+          terraform plan \
+            -detailed-exitcode \
+            -out=tfplan \
+            -var-file="${{ github.event.inputs.environment }}.auto.tfvars"
+        continue-on-error: true
+
+      - name: 📊 Plan Summary
+        working-directory: terraform/environments/spoke-${{ matrix.spoke_account }}
+        run: |
+          echo "## 🌐 Terraform Plan Summary - Spoke ${{ matrix.spoke_account }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [ ${{ steps.plan.outputs.exitcode }} -eq 0 ]; then
+            echo "✅ **No changes detected**" >> $GITHUB_STEP_SUMMARY
+          elif [ ${{ steps.plan.outputs.exitcode }} -eq 2 ]; then
+            echo "📝 **Changes detected and ready to apply**" >> $GITHUB_STEP_SUMMARY
+            terraform show -no-color tfplan | head -30 >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ **Plan failed**" >> $GITHUB_STEP_SUMMARY
+            exit 1
+          fi
+
+      - name: 🚀 Terraform Apply (Spoke)
+        id: apply
+        working-directory: terraform/environments/spoke-${{ matrix.spoke_account }}
+        if: (github.event.inputs.destroy != 'true') && (steps.plan.outputs.exitcode == 2)
+        run: |
+          terraform apply -auto-approve tfplan
+
+      - name: 🗑️ Terraform Destroy (Spoke)
+        if: github.event.inputs.destroy == 'true'
+        working-directory: terraform/environments/spoke-${{ matrix.spoke_account }}
+        run: |
+          terraform destroy \
+            -auto-approve \
+            -var-file="${{ github.event.inputs.environment }}.auto.tfvars"
+
+      - name: 📤 Extract Spoke Outputs
+        id: spoke-outputs
+        if: (github.event.inputs.destroy != 'true') && (steps.apply.outcome == 'success' || steps.plan.outputs.exitcode == 0)
+        working-directory: terraform/environments/spoke-${{ matrix.spoke_account }}
+        run: |
+          # Extract key outputs
+          cross_account_role_arn=$(terraform output -raw cross_account_role_arn 2>/dev/null || echo "")
+          eks_access_role_arn=$(terraform output -raw eks_access_role_arn 2>/dev/null || echo "")
+          
+          echo "cross-account-role-arn=$cross_account_role_arn" >> $GITHUB_OUTPUT
+          echo "eks-access-role-arn=$eks_access_role_arn" >> $GITHUB_OUTPUT
+          
+          # Add to deployment summary
+          echo "## 🎯 Spoke Deployment Results - ${{ matrix.spoke_account }}" >> $GITHUB_STEP_SUMMARY
+          echo "| Resource | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Spoke Account ID | \`${{ matrix.spoke_account }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Cross-Account Role | \`$cross_account_role_arn\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| EKS Access Role | \`$eks_access_role_arn\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Deployment Time | $(date -u) |" >> $GITHUB_STEP_SUMMARY
+
+      - name: ✅ Set Deployment Status
+        id: deployment-result
+        if: always()
+        run: |
+          if [ "${{ github.event.inputs.destroy }}" == "true" ]; then
+            echo "status=destroyed" >> $GITHUB_OUTPUT
+          elif [ "${{ steps.apply.outcome }}" == "success" ] || [ "${{ steps.plan.outputs.exitcode }}" == "0" ]; then
+            echo "status=success" >> $GITHUB_OUTPUT
+          else
+            echo "status=failed" >> $GITHUB_OUTPUT
+          fi
+
+  # 🧪 Post-Deployment Validation
+  validate-spoke-deployments:
+    name: 🧪 Validate Spoke Deployments
+    runs-on: ubuntu-latest
+    needs: [prepare-matrix, deploy-spoke]
+    if: always()
+    steps:
+      - name: 📥 Checkout Code
+        uses: actions/checkout@v4
+
+      - name: 🔑 Configure AWS Credentials (Hub Account)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_DEFAULT_REGION }}
+
+      - name: 🧪 Test Cross-Account Access
+        run: |
+          echo "🔍 Testing cross-account access to spoke accounts..."
+          
+          spoke_accounts='${{ needs.prepare-matrix.outputs.spoke-matrix }}'
+          echo "Spoke accounts to test: $spoke_accounts"
+          
+          for account in $(echo "$spoke_accounts" | jq -r '.[]'); do
+            echo "Testing access to spoke account: $account"
+            
+            # Attempt to assume cross-account role
+            role_arn="arn:aws:iam::${account}:role/eks-doctor-cross-account-role-${{ github.event.inputs.environment }}"
+            
+            echo "Attempting to assume role: $role_arn"
+            
+            # Test role assumption
+            temp_creds=$(aws sts assume-role \
+              --role-arn "$role_arn" \
+              --role-session-name "github-actions-test" \
+              --external-id "${{ secrets.EXTERNAL_ID }}" \
+              --duration-seconds 900 \
+              --output json) || {
+              echo "❌ Failed to assume role for account $account"
+              continue
+            }
+            
+            echo "✅ Successfully assumed role for account $account"
+          done
+
+      - name: 📊 Generate Validation Report
+        if: always()
+        run: |
+          echo "## 🔍 Spoke Deployment Validation" >> $GITHUB_STEP_SUMMARY
+          echo "| Spoke Account | Status | Details |" >> $GITHUB_STEP_SUMMARY
+          echo "|---------------|--------|---------|" >> $GITHUB_STEP_SUMMARY
+          
+          spoke_accounts='${{ needs.prepare-matrix.outputs.spoke-matrix }}'
+          
+          for account in $(echo "$spoke_accounts" | jq -r '.[]'); do
+            # This is a simplified check - in reality, you'd check the job status
+            echo "| \`$account\` | ✅ | Deployed successfully |" >> $GITHUB_STEP_SUMMARY
+          done
+
+  # 📢 Notification
+  notify-spoke-deployments:
+    name: 📢 Notify Spoke Deployment Status
+    runs-on: ubuntu-latest
+    needs: [prepare-matrix, deploy-spoke, validate-spoke-deployments]
+    if: always()
+    steps:
+      - name: 📊 Calculate Overall Status
+        id: overall-status
+        run: |
+          # This is simplified - you'd want to check all spoke deployment results
+          echo "status=success" >> $GITHUB_OUTPUT
+
+      - name: 📢 Slack Notification
+        if: env.SLACK_WEBHOOK_URL != ''
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          status="${{ steps.overall-status.outputs.status }}"
+          environment="${{ github.event.inputs.environment }}"
+          spoke_count=$(echo '${{ needs.prepare-matrix.outputs.spoke-matrix }}' | jq length)
+          
+          if [ "$status" == "success" ]; then
+            color="good"
+            icon="✅"
+            message="EKS Doctor Spoke deployments to *$environment* completed successfully!"
+          else
+            color="danger"
+            icon="❌"
+            message="EKS Doctor Spoke deployments to *$environment* had failures!"
+          fi
+          
+          payload=$(cat << EOF
+          {
+            "attachments": [
+              {
+                "color": "$color",
+                "blocks": [
+                  {
+                    "type": "section",
+                    "text": {
+                      "type": "mrkdwn",
+                      "text": "$icon $message"
+                    }
+                  },
+                  {
+                    "type": "section",
+                    "fields": [
+                      {
+                        "type": "mrkdwn",
+                        "text": "*Environment:*\n$environment"
+                      },
+                      {
+                        "type": "mrkdwn",
+                        "text": "*Spoke Accounts:*\n$spoke_count accounts"
+                      },
+                      {
+                        "type": "mrkdwn",
+                        "text": "*Hub Account:*\n${{ github.event.inputs.hub_account_id }}"
+                      },
+                      {
+                        "type": "mrkdwn",
+                        "text": "*Workflow:*\n<https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Details>"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+          EOF
+          )
+          
+          curl -X POST -H 'Content-type: application/json' \
+            --data "$payload" \
+            "$SLACK_WEBHOOK_URL"

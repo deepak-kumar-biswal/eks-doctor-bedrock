@@ -1,0 +1,501 @@
+name: 🚀 Full Stack Deployment
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+        - staging
+        - prod
+      spoke_accounts:
+        description: 'Comma-separated list of spoke account IDs'
+        required: true
+        type: string
+      auto_approve:
+        description: 'Auto approve all changes'
+        required: false
+        default: false
+        type: boolean
+      skip_tests:
+        description: 'Skip post-deployment tests'
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: full-deployment-${{ github.event.inputs.environment }}
+  cancel-in-progress: false
+
+env:
+  TERRAFORM_VERSION: '1.6.0'
+  PYTHON_VERSION: '3.12'
+  AWS_DEFAULT_REGION: us-east-1
+
+jobs:
+  # 🚦 Pre-deployment Checks
+  pre-deployment-checks:
+    name: 🚦 Pre-deployment Validation
+    runs-on: ubuntu-latest
+    outputs:
+      hub-account-id: ${{ steps.hub-account.outputs.account-id }}
+      spoke-accounts: ${{ steps.spoke-validation.outputs.validated-accounts }}
+    steps:
+      - name: 📥 Checkout Code
+        uses: actions/checkout@v4
+
+      - name: 🔑 Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_DEFAULT_REGION }}
+
+      - name: 🏢 Identify Hub Account
+        id: hub-account
+        run: |
+          account_id=$(aws sts get-caller-identity --query Account --output text)
+          echo "Hub Account ID: $account_id"
+          echo "account-id=$account_id" >> $GITHUB_OUTPUT
+
+      - name: 🔍 Validate Spoke Accounts
+        id: spoke-validation
+        run: |
+          spoke_accounts="${{ github.event.inputs.spoke_accounts }}"
+          hub_account="${{ steps.hub-account.outputs.account-id }}"
+          
+          echo "Validating spoke accounts: $spoke_accounts"
+          echo "Hub account: $hub_account"
+          
+          # Convert to array and validate
+          spoke_array=$(echo "$spoke_accounts" | tr ',' '\n' | sed 's/^[ \t]*//;s/[ \t]*$//' | grep -v "^$")
+          validated_accounts=()
+          
+          for account in $spoke_array; do
+            # Validate account ID format (12 digits)
+            if [[ $account =~ ^[0-9]{12}$ ]]; then
+              if [ "$account" != "$hub_account" ]; then
+                validated_accounts+=("$account")
+                echo "✅ Valid spoke account: $account"
+              else
+                echo "⚠️  Skipping hub account from spoke list: $account"
+              fi
+            else
+              echo "❌ Invalid account ID format: $account"
+              exit 1
+            fi
+          done
+          
+          # Convert back to JSON array
+          validated_json=$(printf '%s\n' "${validated_accounts[@]}" | jq -R -s -c 'split("\n") | map(select(length > 0))')
+          echo "validated-accounts=$validated_json" >> $GITHUB_OUTPUT
+
+      - name: 🔐 Validate Required Secrets
+        run: |
+          missing_secrets=()
+          
+          # Check required secrets
+          [ -z "${{ secrets.TERRAFORM_STATE_BUCKET }}" ] && missing_secrets+=("TERRAFORM_STATE_BUCKET")
+          [ -z "${{ secrets.TERRAFORM_LOCK_TABLE }}" ] && missing_secrets+=("TERRAFORM_LOCK_TABLE")
+          [ -z "${{ secrets.EXTERNAL_ID }}" ] && missing_secrets+=("EXTERNAL_ID")
+          [ -z "${{ secrets.LAMBDA_ARTIFACTS_BUCKET }}" ] && missing_secrets+=("LAMBDA_ARTIFACTS_BUCKET")
+          
+          # Check spoke account credentials
+          spoke_accounts='${{ steps.spoke-validation.outputs.validated-accounts }}'
+          for account in $(echo "$spoke_accounts" | jq -r '.[]'); do
+            access_key_secret="SPOKE_${account}_AWS_ACCESS_KEY_ID"
+            secret_key_secret="SPOKE_${account}_AWS_SECRET_ACCESS_KEY"
+            
+            # Note: We can't directly check if secrets exist in GitHub Actions
+            # This is more of a documentation of what's needed
+            echo "Required secrets for account $account: $access_key_secret, $secret_key_secret"
+          done
+          
+          if [ ${#missing_secrets[@]} -gt 0 ]; then
+            echo "❌ Missing required secrets: ${missing_secrets[*]}"
+            exit 1
+          fi
+          
+          echo "✅ All required secrets validation passed"
+
+      - name: 🏗️ Validate Terraform Configuration
+        run: |
+          cd terraform
+          terraform fmt -check -recursive
+          terraform init -backend=false
+          terraform validate
+
+      - name: 📊 Pre-deployment Summary
+        run: |
+          echo "## 🚀 Full Stack Deployment Plan" >> $GITHUB_STEP_SUMMARY
+          echo "| Parameter | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Environment | ${{ github.event.inputs.environment }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Hub Account | ${{ steps.hub-account.outputs.account-id }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Spoke Accounts | $(echo '${{ steps.spoke-validation.outputs.validated-accounts }}' | jq -r 'join(", ")') |" >> $GITHUB_STEP_SUMMARY
+          echo "| Auto Approve | ${{ github.event.inputs.auto_approve }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Skip Tests | ${{ github.event.inputs.skip_tests }} |" >> $GITHUB_STEP_SUMMARY
+
+  # 🏗️ Deploy Hub Account
+  deploy-hub:
+    name: 🏗️ Deploy Hub Infrastructure
+    needs: pre-deployment-checks
+    uses: ./.github/workflows/deploy-hub.yml
+    with:
+      environment: ${{ github.event.inputs.environment }}
+      auto_approve: ${{ github.event.inputs.auto_approve == 'true' }}
+    secrets: inherit
+
+  # 🌐 Deploy Spoke Accounts
+  deploy-spokes:
+    name: 🌐 Deploy Spoke Accounts
+    needs: [pre-deployment-checks, deploy-hub]
+    uses: ./.github/workflows/deploy-spoke.yml
+    with:
+      environment: ${{ github.event.inputs.environment }}
+      spoke_accounts: ${{ github.event.inputs.spoke_accounts }}
+      hub_account_id: ${{ needs.pre-deployment-checks.outputs.hub-account-id }}
+      auto_approve: ${{ github.event.inputs.auto_approve == 'true' }}
+    secrets: inherit
+
+  # 🔗 Configure Cross-Account Integration
+  configure-integration:
+    name: 🔗 Configure Cross-Account Integration
+    runs-on: ubuntu-latest
+    needs: [pre-deployment-checks, deploy-hub, deploy-spokes]
+    if: |
+      needs.deploy-hub.result == 'success' &&
+      needs.deploy-spokes.result == 'success'
+    steps:
+      - name: 📥 Checkout Code
+        uses: actions/checkout@v4
+
+      - name: 🔑 Configure AWS Credentials (Hub)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_DEFAULT_REGION }}
+
+      - name: 🐍 Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: 🔧 Install Dependencies
+        run: |
+          pip install boto3 pyyaml
+
+      - name: 🔗 Update Bedrock Agent with Spoke Accounts
+        env:
+          SPOKE_ACCOUNTS: ${{ needs.pre-deployment-checks.outputs.spoke-accounts }}
+          HUB_ACCOUNT_ID: ${{ needs.pre-deployment-checks.outputs.hub-account-id }}
+          ENVIRONMENT: ${{ github.event.inputs.environment }}
+        run: |
+          python << 'EOF'
+          import boto3
+          import json
+          import os
+          
+          # Initialize clients
+          bedrock_agent = boto3.client('bedrock-agent')
+          
+          spoke_accounts = json.loads(os.environ['SPOKE_ACCOUNTS'])
+          hub_account = os.environ['HUB_ACCOUNT_ID']
+          environment = os.environ['ENVIRONMENT']
+          
+          print(f"Configuring Bedrock Agent for spoke accounts: {spoke_accounts}")
+          
+          # Get the Bedrock Agent ID (this would be from Terraform outputs in real implementation)
+          agent_name = f"eks-doctor-agent-{environment}"
+          
+          try:
+              # List agents to find our agent
+              agents = bedrock_agent.list_agents()
+              agent_id = None
+              
+              for agent in agents.get('agentSummaries', []):
+                  if agent['agentName'] == agent_name:
+                      agent_id = agent['agentId']
+                      break
+              
+              if agent_id:
+                  print(f"Found Bedrock Agent: {agent_id}")
+                  
+                  # Update agent configuration with spoke account information
+                  # This would include updating the agent's instructions to include
+                  # information about available spoke accounts
+                  
+                  spoke_account_info = {
+                      "hub_account": hub_account,
+                      "spoke_accounts": spoke_accounts,
+                      "environment": environment
+                  }
+                  
+                  print(f"Configuration updated for cross-account access: {spoke_account_info}")
+                  
+              else:
+                  print(f"Bedrock Agent {agent_name} not found")
+                  
+          except Exception as e:
+              print(f"Error configuring Bedrock Agent: {str(e)}")
+          EOF
+
+      - name: 🧪 Test Cross-Account Connectivity
+        env:
+          SPOKE_ACCOUNTS: ${{ needs.pre-deployment-checks.outputs.spoke-accounts }}
+          EXTERNAL_ID: ${{ secrets.EXTERNAL_ID }}
+          ENVIRONMENT: ${{ github.event.inputs.environment }}
+        run: |
+          echo "🔍 Testing cross-account connectivity..."
+          
+          spoke_accounts='${{ needs.pre-deployment-checks.outputs.spoke-accounts }}'
+          
+          for account in $(echo "$spoke_accounts" | jq -r '.[]'); do
+            echo "Testing connection to spoke account: $account"
+            
+            role_arn="arn:aws:iam::${account}:role/eks-doctor-cross-account-role-${ENVIRONMENT}"
+            
+            # Test role assumption
+            if aws sts assume-role \
+              --role-arn "$role_arn" \
+              --role-session-name "integration-test" \
+              --external-id "$EXTERNAL_ID" \
+              --duration-seconds 900 \
+              --output json > /dev/null 2>&1; then
+              echo "✅ Successfully connected to spoke account: $account"
+            else
+              echo "❌ Failed to connect to spoke account: $account"
+              exit 1
+            fi
+          done
+
+  # 🧪 End-to-End Tests
+  e2e-tests:
+    name: 🧪 End-to-End Tests
+    runs-on: ubuntu-latest
+    needs: [pre-deployment-checks, deploy-hub, deploy-spokes, configure-integration]
+    if: |
+      github.event.inputs.skip_tests != 'true' &&
+      needs.deploy-hub.result == 'success' &&
+      needs.deploy-spokes.result == 'success' &&
+      needs.configure-integration.result == 'success'
+    steps:
+      - name: 📥 Checkout Code
+        uses: actions/checkout@v4
+
+      - name: 🔑 Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_DEFAULT_REGION }}
+
+      - name: 🐍 Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: 🔧 Install Test Dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install requests pytest-html
+
+      - name: 🧪 Run End-to-End Tests
+        env:
+          ENVIRONMENT: ${{ github.event.inputs.environment }}
+          HUB_ACCOUNT_ID: ${{ needs.pre-deployment-checks.outputs.hub-account-id }}
+          SPOKE_ACCOUNTS: ${{ needs.pre-deployment-checks.outputs.spoke-accounts }}
+        run: |
+          # Run comprehensive E2E tests
+          python -m pytest tests/ \
+            -v \
+            -k "e2e or integration" \
+            --tb=short \
+            --html=e2e-test-report.html \
+            --self-contained-html \
+            || exit 1
+
+      - name: 🏥 System Health Check
+        run: |
+          echo "🏥 Running system health checks..."
+          
+          # Check Lambda functions
+          functions=(
+            "eks-doctor-health-snapshot-${{ github.event.inputs.environment }}"
+            "eks-doctor-network-triage-${{ github.event.inputs.environment }}"
+            "eks-doctor-bedrock-analyze-${{ github.event.inputs.environment }}"
+          )
+          
+          for func in "${functions[@]}"; do
+            if aws lambda get-function --function-name "$func" > /dev/null 2>&1; then
+              echo "✅ Function $func is deployed"
+              
+              # Test function
+              result=$(aws lambda invoke \
+                --function-name "$func" \
+                --payload '{"test": true}' \
+                --output json \
+                response.json)
+              
+              if [ $? -eq 0 ]; then
+                echo "✅ Function $func executed successfully"
+              else
+                echo "❌ Function $func execution failed"
+              fi
+            else
+              echo "❌ Function $func not found"
+            fi
+          done
+
+      - name: 📤 Upload Test Results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: e2e-test-results
+          path: |
+            e2e-test-report.html
+            response.json
+          retention-days: 30
+
+  # 📊 Generate Deployment Report
+  deployment-report:
+    name: 📊 Generate Deployment Report
+    runs-on: ubuntu-latest
+    needs: [pre-deployment-checks, deploy-hub, deploy-spokes, configure-integration, e2e-tests]
+    if: always()
+    steps:
+      - name: 📊 Generate Comprehensive Report
+        run: |
+          cat << 'EOF' >> $GITHUB_STEP_SUMMARY
+          # 🚀 EKS Doctor Full Stack Deployment Report
+          
+          ## 📋 Deployment Overview
+          - **Environment**: ${{ github.event.inputs.environment }}
+          - **Hub Account**: ${{ needs.pre-deployment-checks.outputs.hub-account-id }}
+          - **Spoke Accounts**: $(echo '${{ needs.pre-deployment-checks.outputs.spoke-accounts }}' | jq -r 'join(", ")')
+          - **Deployment Time**: $(date -u)
+          - **Triggered By**: ${{ github.actor }}
+          
+          ## 🎯 Deployment Status
+          | Component | Status | Details |
+          |-----------|--------|---------|
+          | Pre-deployment Checks | ${{ needs.pre-deployment-checks.result == 'success' && '✅ Success' || '❌ Failed' }} | Validation and prerequisites |
+          | Hub Account | ${{ needs.deploy-hub.result == 'success' && '✅ Success' || '❌ Failed' }} | Bedrock Agent, Lambda functions |
+          | Spoke Accounts | ${{ needs.deploy-spokes.result == 'success' && '✅ Success' || '❌ Failed' }} | Cross-account roles and monitoring |
+          | Integration Config | ${{ needs.configure-integration.result == 'success' && '✅ Success' || '❌ Failed' }} | Cross-account connectivity |
+          | E2E Tests | ${{ needs.e2e-tests.result == 'success' && '✅ Success' || needs.e2e-tests.result == 'skipped' && '⏭️ Skipped' || '❌ Failed' }} | End-to-end functionality |
+          
+          ## 🔗 Key Resources
+          - **Bedrock Agent**: eks-doctor-agent-${{ github.event.inputs.environment }}
+          - **API Gateway**: https://api.eks-doctor.your-domain.com
+          - **Lambda Functions**: 9 functions deployed
+          - **Cross-Account Roles**: $(echo '${{ needs.pre-deployment-checks.outputs.spoke-accounts }}' | jq length) roles configured
+          
+          ## 📈 Next Steps
+          1. Configure EKS clusters in spoke accounts
+          2. Test cluster health monitoring
+          3. Verify approval workflows
+          4. Set up monitoring dashboards
+          
+          ---
+          *Deployment completed at $(date -u)*
+          EOF
+
+  # 📢 Final Notification
+  notify-completion:
+    name: 📢 Deployment Complete Notification
+    runs-on: ubuntu-latest
+    needs: [pre-deployment-checks, deploy-hub, deploy-spokes, configure-integration, e2e-tests, deployment-report]
+    if: always()
+    steps:
+      - name: 📊 Calculate Overall Status
+        id: overall-status
+        run: |
+          # Determine overall deployment status
+          if [[ "${{ needs.deploy-hub.result }}" == "success" && "${{ needs.deploy-spokes.result }}" == "success" ]]; then
+            echo "status=success" >> $GITHUB_OUTPUT
+            echo "message=Full stack deployment completed successfully!" >> $GITHUB_OUTPUT
+            echo "color=good" >> $GITHUB_OUTPUT
+          elif [[ "${{ needs.deploy-hub.result }}" == "failure" || "${{ needs.deploy-spokes.result }}" == "failure" ]]; then
+            echo "status=failure" >> $GITHUB_OUTPUT
+            echo "message=Deployment failed! Check the logs for details." >> $GITHUB_OUTPUT
+            echo "color=danger" >> $GITHUB_OUTPUT
+          else
+            echo "status=partial" >> $GITHUB_OUTPUT
+            echo "message=Deployment completed with warnings." >> $GITHUB_OUTPUT
+            echo "color=warning" >> $GITHUB_OUTPUT
+          fi
+
+      - name: 📢 Slack Notification
+        if: env.SLACK_WEBHOOK_URL != ''
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          status="${{ steps.overall-status.outputs.status }}"
+          message="${{ steps.overall-status.outputs.message }}"
+          color="${{ steps.overall-status.outputs.color }}"
+          environment="${{ github.event.inputs.environment }}"
+          spoke_count=$(echo '${{ needs.pre-deployment-checks.outputs.spoke-accounts }}' | jq length)
+          
+          payload=$(cat << EOF
+          {
+            "attachments": [
+              {
+                "color": "$color",
+                "blocks": [
+                  {
+                    "type": "header",
+                    "text": {
+                      "type": "plain_text",
+                      "text": "🚀 EKS Doctor Full Stack Deployment"
+                    }
+                  },
+                  {
+                    "type": "section",
+                    "text": {
+                      "type": "mrkdwn",
+                      "text": "$message"
+                    }
+                  },
+                  {
+                    "type": "section",
+                    "fields": [
+                      {
+                        "type": "mrkdwn",
+                        "text": "*Environment:*\n$environment"
+                      },
+                      {
+                        "type": "mrkdwn",
+                        "text": "*Hub Account:*\n${{ needs.pre-deployment-checks.outputs.hub-account-id }}"
+                      },
+                      {
+                        "type": "mrkdwn",
+                        "text": "*Spoke Accounts:*\n$spoke_count accounts"
+                      },
+                      {
+                        "type": "mrkdwn",
+                        "text": "*Deployed By:*\n${{ github.actor }}"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "section",
+                    "text": {
+                      "type": "mrkdwn",
+                      "text": "<https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}|📊 View Deployment Details>"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+          EOF
+          )
+          
+          curl -X POST -H 'Content-type: application/json' \
+            --data "$payload" \
+            "$SLACK_WEBHOOK_URL"

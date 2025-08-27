@@ -1,0 +1,51 @@
+# Development and Testing Dependencies
+# These are additional packages needed for development, testing, and CI/CD
+
+# Code Quality Tools
+black>=23.0.0
+isort>=5.12.0
+flake8>=6.0.0
+pylint>=2.17.0
+
+# Security Scanning
+bandit>=1.7.5
+safety>=2.3.0
+
+# Testing Framework
+pytest>=7.4.0
+pytest-cov>=4.1.0
+pytest-html>=3.2.0
+pytest-xdist>=3.3.0
+pytest-mock>=3.11.0
+moto>=4.2.0
+
+# Type Checking
+mypy>=1.5.0
+types-requests>=2.31.0
+types-PyYAML>=6.0.0
+
+# Documentation
+mkdocs>=1.5.0
+mkdocs-material>=9.2.0
+mkdocs-mermaid2-plugin>=1.1.0
+
+# Development Utilities
+pre-commit>=3.3.0
+coverage>=7.3.0
+wheel>=0.41.0
+build>=0.10.0
+
+# AWS Testing and Development
+localstack>=2.2.0
+aws-cli>=1.29.0
+cfn-lint>=0.79.0
+
+# Terraform Testing
+checkov>=2.4.0
+
+# Performance Testing
+locust>=2.16.0
+
+# API Testing
+requests-mock>=1.11.0
+httpretty>=1.1.4
