@@ -13,14 +13,14 @@ A **comprehensive, enterprise-grade** EKS cluster diagnostic and remediation sys
 ## 📋 Table of Contents
 
 - [Architecture Overview](#architecture-overview)
+- [Features](#features)
 - [Quick Start](#quick-start)
+- [Usage](#usage)
 - [Configuration](#configuration)
-- [Security Services](#security-services)
-- [API Reference](#api-reference)
-- [Monitoring](#monitoring)
+- [Advanced Features](#advanced-features)
+- [Security & Compliance](#security--compliance)
 - [Troubleshooting](#troubleshooting)
 - [Contributing](#contributing)
-- [Support](#support)
 
 ## Architecture Overview
 
