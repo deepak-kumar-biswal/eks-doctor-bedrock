@@ -1,6 +1,26 @@
-# EKS Doctor - Bedrock Agent Solution
+# 🏥 EKS Doctor - AI-Powered Kubernetes Diagnostics Platform
 
-A production-grade, AI-powered EKS cluster diagnostic and remediation system using AWS Bedrock Agent with hub-and-spoke architecture.
+[![CI Pipeline](https://github.com/your-org/eks-doctor-bedrock/workflows/CI/badge.svg)](https://github.com/your-org/eks-doctor-bedrock/actions)
+[![Deploy Hub](https://github.com/your-org/eks-doctor-bedrock/workflows/Deploy%20Hub/badge.svg)](https://github.com/your-org/eks-doctor-bedrock/actions)
+[![Deploy Spoke](https://github.com/your-org/eks-doctor-bedrock/workflows/Deploy%20Spoke/badge.svg)](https://github.com/your-org/eks-doctor-bedrock/actions)
+[![Security Scan](https://github.com/your-org/eks-doctor-bedrock/workflows/Security%20Scan/badge.svg)](https://github.com/your-org/eks-doctor-bedrock/actions)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
+## 🚀 Production-Grade AI-Powered EKS Diagnostics & Remediation
+
+A **comprehensive, enterprise-grade** EKS cluster diagnostic and remediation system using **AWS Bedrock Agent** with intelligent hub-and-spoke architecture for **1000+ EKS clusters** across multiple AWS accounts.
+
+## 📋 Table of Contents
+
+- [Architecture Overview](#architecture-overview)
+- [Quick Start](#quick-start)
+- [Configuration](#configuration)
+- [Security Services](#security-services)
+- [API Reference](#api-reference)
+- [Monitoring](#monitoring)
+- [Troubleshooting](#troubleshooting)
+- [Contributing](#contributing)
+- [Support](#support)
 
 ## Architecture Overview
 
