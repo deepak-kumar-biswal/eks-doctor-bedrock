@@ -2,6 +2,10 @@
 boto3>=1.34.0
 botocore>=1.34.0
 
+# AWS Bedrock specific
+bedrock-agent>=1.0.0
+bedrock-runtime>=1.0.0
+
 # HTTP requests and networking
 urllib3>=1.26.18,<2.0
 requests>=2.31.0

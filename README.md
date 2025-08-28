@@ -1,10 +1,24 @@
-# 🏥 EKS Doctor - AI-Powered Kubernetes Diagnostics Platform
+<div align="center">
+  <img src="https://img.shields.io/badge/%F0%9F%8F%A5-EKS%20Doctor%20AI-blue?style=for-the-badge&logoColor=white" alt="EKS Doctor"/>
+  <img src="https://img.shields.io/badge/%F0%9F%A4%96-AI%20Powered-purple?style=for-the-badge" alt="AI Powered"/>
+  <img src="https://img.shields.io/badge/%E2%9A%A1-Production%20Grade-green?style=for-the-badge" alt="Production Grade"/>
+</div>
 
-[![CI Pipeline](https://github.com/your-org/eks-doctor-bedrock/workflows/CI/badge.svg)](https://github.com/your-org/eks-doctor-bedrock/actions)
-[![Deploy Hub](https://github.com/your-org/eks-doctor-bedrock/workflows/Deploy%20Hub/badge.svg)](https://github.com/your-org/eks-doctor-bedrock/actions)
-[![Deploy Spoke](https://github.com/your-org/eks-doctor-bedrock/workflows/Deploy%20Spoke/badge.svg)](https://github.com/your-org/eks-doctor-bedrock/actions)
-[![Security Scan](https://github.com/your-org/eks-doctor-bedrock/workflows/Security%20Scan/badge.svg)](https://github.com/your-org/eks-doctor-bedrock/actions)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+<div align="center">
+  <h1>🏥 EKS Doctor - AI-Powered Kubernetes Diagnostics Platform</h1>
+  <p><strong>AI-powered EKS diagnostics and remediation for 1000+ EKS clusters</strong></p>
+</div>
+
+<div align="center">
+
+[![Terraform](https://img.shields.io/badge/Terraform-1.5%2B-623CE4?style=for-the-badge&logo=terraform&logoColor=white)](https://www.terraform.io/)
+[![AWS Bedrock](https://img.shields.io/badge/AWS-Bedrock-FF9900?style=for-the-badge&logo=amazon-aws&logoColor=white)](https://aws.amazon.com/bedrock/)
+[![Kubernetes](https://img.shields.io/badge/Kubernetes-1.28%2B-326CE5?style=for-the-badge&logo=kubernetes&logoColor=white)](https://kubernetes.io/)
+[![Python](https://img.shields.io/badge/Python-3.9%2B-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
+[![AI Diagnostics](https://img.shields.io/badge/AI-Diagnostics-9F7AEA?style=for-the-badge&logo=brain&logoColor=white)](https://aws.amazon.com/bedrock/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=for-the-badge)](https://opensource.org/licenses/MIT)
+
+</div>
 
 ## 🚀 Production-Grade AI-Powered EKS Diagnostics & Remediation
 
